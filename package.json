@@ -9,7 +9,9 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "check-setup": "node --env-file=.env.local scripts/check-setup.mjs",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "test": "vitest run",
+    "test:smoke": "SMOKE=1 node --env-file=.env.local node_modules/vitest/vitest.mjs run src/lib/ai/live.smoke.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.31.0",
@@ -27,6 +29,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "15.5.28",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^3.2.7"
   }
 }

@@ -47,7 +47,9 @@ export function linkEvidence(discrepancies: Discrepancy[], docs: CitableDocs): S
 // than being presented as a confirmed discrepancy.
 export function analysisStatus(discrepancies: Discrepancy[]): CaseStatus {
   if (discrepancies.some((d) => d.evidenceRefs.length === 0)) return "NEEDS_REVIEW";
-  return discrepancies.length > 0 ? "DISCREPANCY_FOUND" : "NO_DISCREPANCY";
+  if (discrepancies.length === 0) return "NO_DISCREPANCY";
+  // Quantity gaps are a confirmed discrepancy; price/tax/reference/unit/duplicate findings are unresolved.
+  return discrepancies.every((d) => d.issueType === "QUANTITY") ? "DISCREPANCY_FOUND" : "NEEDS_REVIEW";
 }
 
 const REVALIDATION_STATUSES: CaseStatus[] = [

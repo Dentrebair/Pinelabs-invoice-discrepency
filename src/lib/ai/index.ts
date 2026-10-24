@@ -3,9 +3,11 @@ import type { z } from "zod";
 import type { CaseStatus, Discrepancy, ExtractedDocument } from "@/lib/contracts";
 import { writeDraft } from "./draft";
 import { extractDocument } from "./extract";
-import { formatInr, threeWayMatch } from "./match";
+import { formatInr, statusFor, threeWayMatch } from "./match";
 
-export { AiOutputError } from "./gemini";
+import { AiOutputError } from "./gemini";
+
+export { AiOutputError };
 
 // Gemini reads the PDFs and writes prose; threeWayMatch (plain code) decides
 // every discrepancy and amount.
@@ -17,9 +19,11 @@ export async function analyzeDocuments(input: { poPdf: Buffer; invoicePdf: Buffe
     extractDocument(input.grnPdf, "GRN"),
   ]);
   const extractedDocuments = { PO, INVOICE, GRN };
-  // A swapped upload is reported via docType and rejected by the backend.
+  // A swapped or wrong upload must never look like "no discrepancy": reject it (422, case NEEDS_REVIEW).
   if (PO.docType !== "PO" || INVOICE.docType !== "INVOICE" || GRN.docType !== "GRN") {
-    return { extractedDocuments, discrepancies: [], investigationSummary: "Document types do not match upload fields.", supplierMessageDraft: null };
+    throw new AiOutputError(
+      `Uploaded files were read as ${PO.docType}/${INVOICE.docType}/${GRN.docType}, expected PO/INVOICE/GRN`,
+    );
   }
   const discrepancies = threeWayMatch(PO, INVOICE, GRN);
   const { investigationSummary, supplierMessageDraft } = await writeDraft(extractedDocuments, discrepancies);
@@ -56,11 +60,14 @@ export async function revalidateInvoice(input: {
       discrepancies: [],
       explanation:
         `${revised.documentNumber} (revising ${INVOICE.documentNumber}) bills ${billed}, which matches ` +
-        `${GRN.documentNumber} and ${PO.documentNumber}. No outstanding discrepancies; ready for payment approval.`,
+        `${GRN.documentNumber} and ${PO.documentNumber}. No outstanding discrepancies; ready for payment approval ` +
+        `(no payment has been made; any undelivered quantity stays outstanding on the PO).`,
       status: "READY_FOR_PAYMENT_APPROVAL",
     };
   }
 
+  // Only plain quantity gaps stay DISCREPANCY_FOUND; price/tax/reference/unit/ambiguity => NEEDS_REVIEW.
+  const status = statusFor(outstanding);
   const total = outstanding.reduce((sum, d) => sum + d.amountUnderReviewPaise, 0);
   return {
     extractedRevisedInvoice: revised,
@@ -68,6 +75,6 @@ export async function revalidateInvoice(input: {
     explanation:
       `${revised.documentNumber} bills ${billed}, but ${outstanding.length} discrepanc${outstanding.length === 1 ? "y remains" : "ies remain"} ` +
       `against ${PO.documentNumber} / ${GRN.documentNumber} (${formatInr(total)} before GST under review).`,
-    status: "DISCREPANCY_FOUND",
+    status,
   };
 }
