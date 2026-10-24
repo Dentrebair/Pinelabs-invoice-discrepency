@@ -74,6 +74,13 @@ async function liveRevalidate(input: RevalidateInput): Promise<unknown> {
 
 const MOCK = "[MOCK AI RESULT — not a live analysis]";
 
+// Test-only fault injection for the mock: AI_MOCK_FAULT=invalid | timeout.
+function mockFault(): Promise<unknown> | null {
+  if (process.env.AI_MOCK_FAULT === "invalid") return Promise.resolve({ discrepancies: "not-an-array" });
+  if (process.env.AI_MOCK_FAULT === "timeout") return new Promise(() => {});
+  return null;
+}
+
 const carton = (quantity: number, unitPricePaise: number | null) => ({
   lineRef: "1",
   sku: "CARTON-01",
@@ -95,6 +102,8 @@ const mockDoc = (docType: string, documentNumber: string, item: ReturnType<typeo
 });
 
 async function mockAnalyze(): Promise<unknown> {
+  const fault = mockFault();
+  if (fault) return fault;
   return {
     extractedDocuments: {
       PO: mockDoc("PO", "PO-1001", carton(100, 50_000)),
@@ -124,6 +133,8 @@ async function mockAnalyze(): Promise<unknown> {
 }
 
 async function mockRevalidate(): Promise<unknown> {
+  const fault = mockFault();
+  if (fault) return fault;
   return {
     extractedRevisedInvoice: mockDoc("REVISED_INVOICE", "INV-1001-R1", carton(80, 50_000)),
     discrepancies: [],
