@@ -1,11 +1,12 @@
 import "server-only";
 import { z } from "zod";
+import { AiOutputError, analyzeDocuments, revalidateInvoice } from "@/lib/ai";
 import { CaseStatus, Discrepancy, ExtractedDocument } from "@/lib/contracts";
 import { ApiError } from "./errors";
 
-// Integration seam with Dev 2's AI module (src/lib/ai/*). The backend only
+// Integration seam with the AI module (src/lib/ai/*). The backend only
 // validates and persists these results; extraction, matching and calculations
-// live in Dev 2's code. Agree these shapes with Dev 2 before wiring "live".
+// live in the AI module.
 
 export const AnalyzeAiResult = z.object({
   extractedDocuments: z.object({
@@ -52,19 +53,25 @@ export async function runRevalidation(input: RevalidateInput): Promise<Revalidat
   return parseAi(RevalidateAiResult, raw);
 }
 
-// --- live: Dev 2 exports ----------------------------------------------------
-// TODO(dev2-integration): replace with Dev 2's exports once available, e.g.
-//   import { analyzeDocuments, revalidateInvoice } from "@/lib/ai";
-//   return analyzeDocuments(input);
+// --- live: AI module (src/lib/ai, Gemini) ------------------------------------
 
 async function liveAnalyze(input: AnalyzeInput): Promise<unknown> {
-  void input;
-  throw new ApiError(503, "AI_NOT_CONFIGURED", "Live AI analysis is not wired up yet");
+  return analyzeDocuments(input).catch(mapAiError);
 }
 
 async function liveRevalidate(input: RevalidateInput): Promise<unknown> {
-  void input;
-  throw new ApiError(503, "AI_NOT_CONFIGURED", "Live AI revalidation is not wired up yet");
+  return revalidateInvoice(input).catch(mapAiError);
+}
+
+// Untrustworthy model output → 422 (case NEEDS_REVIEW); provider/network
+// failures → 502. Provider messages are logged briefly, never returned.
+function mapAiError(err: unknown): never {
+  if (err instanceof AiOutputError) {
+    console.error("[ai] output rejected:", err.message);
+    throw new ApiError(422, "AI_INVALID_OUTPUT", "AI could not reliably read the documents; case flagged for review");
+  }
+  console.error("[ai] provider error:", err instanceof Error ? err.message.slice(0, 200) : "unknown");
+  throw new ApiError(502, "AI_UPSTREAM_ERROR", "AI service request failed");
 }
 
 // --- mock: TEMPORARY fixture for endpoint tests -----------------------------

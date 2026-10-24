@@ -13,8 +13,9 @@ npm run dev
 npm run smoke                # end-to-end acceptance checks (needs dev server)
 ```
 
-`AI_MODE=mock` (default) returns a fixed SR-001 fixture whose text fields start with
-`[MOCK AI RESULT …]`. It is for endpoint testing only, not a live analysis.
+`AI_MODE=live` uses Gemini (`GEMINI_API_KEY`). An analyze call takes ~20–30 s.
+`AI_MODE=mock` returns a fixed SR-001 fixture whose text fields start with
+`[MOCK AI RESULT …]` — for offline endpoint testing only, not a live analysis.
 
 ## For Dev 1 (UI)
 
@@ -74,16 +75,28 @@ paths and file bytes are never returned.
 | 409 | `CASE_NOT_READY` (revalidate before analyze), `VERSION_CONFLICT` |
 | 413 | `FILE_TOO_LARGE` (>10 MB per file), `PAYLOAD_TOO_LARGE` |
 | 422 | `AI_INVALID_OUTPUT` — case set to `NEEDS_REVIEW` |
-| 503 | `AI_NOT_CONFIGURED` — `AI_MODE=live` before Dev 2 wiring |
+| 502 | `AI_UPSTREAM_ERROR` — Gemini request failed — case set to `ERROR` |
 | 504 | `AI_TIMEOUT` — case set to `NEEDS_REVIEW` |
 | 500 | `STORAGE_ERROR`, `DB_ERROR`, `INTERNAL_ERROR` — case set to `ERROR` |
 
 Every failure after the case is resolved writes an `ERROR` case event.
 
-## For Dev 2 (AI)
+## AI module (`src/lib/ai`, Gemini)
 
-The single seam is `src/lib/server/ai.ts`. Replace `liveAnalyze` / `liveRevalidate`
-with your exports, then set `AI_MODE=live`. Outputs are validated with Zod; anything
+| File | Role |
+|---|---|
+| `extract.ts` | Gemini reads one PDF into `ExtractedDocument` (structured JSON output). Prices are returned as printed text and converted to paise in code; GRN quantity = accepted qty. |
+| `match.ts` | Deterministic three-way match — no model. Billable = min(ordered, accepted); QUANTITY = excess × min(invoice, PO price); PRICE = (invoice − PO price) × invoiced. Also flags PO-number / supplier mismatches and items not on the PO. |
+| `draft.ts` | Gemini writes the summary and supplier email from the computed findings only (figures passed pre-formatted). |
+| `index.ts` | Exports `analyzeDocuments` and `revalidateInvoice`. |
+
+Checked against all five seed cases: SR-001 (20 ctn, ₹10,000), SR-002 (none),
+SR-003 (price, ₹5,000) and the SR-001/SR-003 revisions (→ ready) match the expected
+amounts. SR-004 / SR-005 get the correct ₹10,000 but are labelled `QUANTITY`; the
+staged-delivery / conflicting-evidence nuance needs supplier-response documents the
+MVP does not ingest.
+
+Wiring lives in `src/lib/server/ai.ts`. Outputs are re-validated with Zod; anything
 that fails becomes `422 AI_INVALID_OUTPUT` and the case goes to `NEEDS_REVIEW`.
 
 All types are from `src/lib/contracts.ts` (`ExtractedDocument`, `Discrepancy`,
