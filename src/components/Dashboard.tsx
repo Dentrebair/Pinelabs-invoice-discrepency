@@ -169,7 +169,10 @@ export function Dashboard() {
       <header className="mb-8 flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900 sm:text-3xl">Supplier Resolution</h1>
-          <p className="mt-1 text-sm text-slate-600">Compare the PO, invoice and goods receipt, review mismatches and verify a corrected invoice.</p>
+          <p className="mt-2 max-w-xl text-base leading-relaxed text-slate-600">
+            Check a supplier invoice before you pay it. Upload the purchase order, invoice and goods receipt and we&apos;ll flag any mismatch,
+            draft a message to the supplier, and confirm their corrected invoice.
+          </p>
         </div>
         {detail && (
           <div className="flex items-center gap-3" aria-live="polite">
