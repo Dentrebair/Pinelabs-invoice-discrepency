@@ -19,7 +19,9 @@ import type { CaseStatus } from "@/lib/server/types";
 export const runtime = "nodejs";
 
 // Revalidation only makes sense once an analysis has produced findings.
-const REVALIDATABLE: CaseStatus[] = ["DISCREPANCY_FOUND", "AWAITING_APPROVAL", "AWAITING_SUPPLIER", "NEEDS_REVIEW"];
+// ERROR is included so a transient AI/network failure during revalidation can be retried with the same
+// originals; loadParsedOriginals still requires a completed analysis.
+const REVALIDATABLE: CaseStatus[] = ["DISCREPANCY_FOUND", "AWAITING_APPROVAL", "AWAITING_SUPPLIER", "NEEDS_REVIEW", "ERROR"];
 
 export async function POST(req: Request) {
   let caseId: string | null = null;
@@ -77,9 +79,11 @@ export async function POST(req: Request) {
     let resolvedCount = 0;
     if (status === "READY_FOR_PAYMENT_APPROVAL") {
       resolvedCount = await resolveOpenDiscrepancies(kase.id);
-    } else {
+    } else if (ai.discrepancies.length > 0) {
       await replaceUnresolvedDiscrepancies(kase.id, ai.discrepancies, refs);
     }
+    // else: not resolved but nothing concrete to report (e.g. the upload was not an invoice). Keep the
+    // existing findings so the reviewer does not lose the evidence they were working from.
     await updateCase(kase.id, { status });
 
     await recordEvent(kase.id, "REVALIDATED", "AI", `Revalidation complete: ${status}`, {

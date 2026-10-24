@@ -130,7 +130,9 @@ export function matchDocuments({ po, invoice, grn }: MatchInput): MatchResult {
     if (invC.length > 1 || grnC.length > 1) {
       const dup = invC.length > 1 ? invoice : grn;
       const cands = invC.length > 1 ? invC : grnC;
-      cands.forEach((c) => (dup === invoice ? usedInvoice : usedGrn).add(c.index));
+      // Consume every candidate on both sides so they are not reported again as "unmatched".
+      invC.forEach((c) => usedInvoice.add(c.index));
+      grnC.forEach((c) => usedGrn.add(c.index));
       out.push(reviewIssue(
         `PO line "${label}" matches ${cands.length} lines on ${dup.docType} ${dup.documentNumber}; possible duplicate or ambiguous line.`,
         'Ask the supplier to clarify or remove the duplicate line.',

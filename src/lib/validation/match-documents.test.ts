@@ -116,3 +116,88 @@ describe('matchDocuments', () => {
     expect(matchDocuments({ po: po(), invoice: inv, grn: grn() }).status).toBe('NEEDS_REVIEW');
   });
 });
+
+describe('matchDocuments: edge cases', () => {
+  const two = (a: number, b: number, price = 50000) => ({
+    items: [
+      { sku: 'A', description: 'Box A', unit: 'carton', quantity: a, unitPricePaise: price },
+      { sku: 'B', description: 'Box B', unit: 'carton', quantity: b, unitPricePaise: 20000 },
+    ],
+  });
+  const grnTwo = (a: number, b: number) => ({
+    items: [
+      { sku: 'A', description: 'Box A', unit: 'carton', quantity: a, unitPricePaise: null },
+      { sku: 'B', description: 'Box B', unit: 'carton', quantity: b, unitPricePaise: null },
+    ],
+  });
+
+  it('multi-line: only the short line is flagged, with the right line index in evidence', () => {
+    const r = matchDocuments({ po: { ...po(), ...two(10, 10) }, invoice: { ...invoice(), ...two(10, 10) }, grn: { ...grn(), ...grnTwo(10, 7) } });
+    expect(r.discrepancies).toHaveLength(1);
+    expect(r.discrepancies[0]).toMatchObject({ issueType: 'QUANTITY', lineRef: 'B', amountUnderReviewPaise: 3 * 20000 });
+    expect(r.discrepancies[0].evidenceRefs.map((e) => e.field)).toEqual(['items[1].quantity', 'items[1].quantity', 'items[1].quantity']);
+  });
+
+  it('lines in a different order across documents still match by SKU', () => {
+    const inv = { ...invoice(), items: [...two(10, 10).items].reverse() };
+    const r = matchDocuments({ po: { ...po(), ...two(10, 10) }, invoice: inv, grn: { ...grn(), ...grnTwo(10, 10) } });
+    expect(r).toEqual({ discrepancies: [], status: 'NO_DISCREPANCY' });
+  });
+
+  it('duplicate invoice lines produce exactly one DUPLICATE finding (no extra "unmatched line" noise)', () => {
+    const inv = invoice();
+    inv.items.push({ ...inv.items[0] });
+    const r = matchDocuments({ po: po(), invoice: inv, grn: grn() });
+    expect(r.discrepancies.map((d) => d.issueType)).toEqual(['DUPLICATE']);
+  });
+
+  it('duplicate GRN lines produce exactly one DUPLICATE finding', () => {
+    const g = grn();
+    g.items.push({ ...g.items[0] });
+    expect(matchDocuments({ po: po(), invoice: invoice(), grn: g }).discrepancies.map((d) => d.issueType)).toEqual(['DUPLICATE']);
+  });
+
+  it('GRN without a PO reference cannot be tied to the PO: NEEDS_REVIEW', () => {
+    const r = matchDocuments({ po: po(), invoice: invoice(), grn: grn({ poNumber: null }) });
+    expect(r.status).toBe('NEEDS_REVIEW');
+  });
+
+  it('PO reference comparison ignores case and surrounding whitespace', () => {
+    const r = matchDocuments({ po: po(), invoice: invoice({ poNumber: ' po-1001 ' }), grn: grn() });
+    expect(r.status).toBe('NO_DISCREPANCY');
+  });
+
+  it('invoiced line missing from the GRN: NEEDS_REVIEW, not silently zero received', () => {
+    const g = grn({ desc: 'Something else' });
+    const r = matchDocuments({ po: po(), invoice: invoice(), grn: g });
+    expect(r.status).toBe('NEEDS_REVIEW');
+  });
+
+  it('over-delivery (GRN > PO) with invoice at PO quantity is fine', () => {
+    expect(matchDocuments({ po: po(), invoice: invoice(), grn: grn({ qty: 120 }) }).status).toBe('NO_DISCREPANCY');
+  });
+
+  it('nothing received: whole invoice is under review', () => {
+    const r = matchDocuments({ po: po(), invoice: invoice(), grn: grn({ qty: 0 }) });
+    expect(r.discrepancies[0]).toMatchObject({ issueType: 'QUANTITY', receivedQty: 0, amountUnderReviewPaise: 100 * 50000 });
+  });
+
+  it('large amounts stay exact integers', () => {
+    const r = matchDocuments({ po: po({ qty: 1_000_000, price: 999_999_99 }), invoice: invoice({ qty: 1_000_000, price: 999_999_99 }), grn: grn({ qty: 999_999 }) });
+    expect(r.discrepancies[0].amountUnderReviewPaise).toBe(99_999_999);
+    expect(Number.isInteger(r.discrepancies[0].amountUnderReviewPaise)).toBe(true);
+  });
+
+  it('every finding carries evidence and integer paise', () => {
+    const cases = [
+      matchDocuments({ po: po(), invoice: invoice(), grn: grn({ qty: 80 }) }),
+      matchDocuments({ po: po(), invoice: invoice({ price: 51000 }), grn: grn() }),
+      matchDocuments({ po: po(), invoice: invoice({ poNumber: 'PO-2' }), grn: grn() }),
+      matchDocuments({ po: po(), invoice: invoice({ unit: 'pallet' }), grn: grn() }),
+    ];
+    for (const d of cases.flatMap((c) => c.discrepancies)) {
+      expect(d.evidenceRefs.length).toBeGreaterThan(0);
+      expect(Number.isInteger(d.amountUnderReviewPaise)).toBe(true);
+    }
+  });
+});
