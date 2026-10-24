@@ -1,5 +1,5 @@
 import "server-only";
-import type { CaseStatus } from "@/lib/contracts";
+import type { CaseStatus } from "./types";
 import { ApiError, assertUuid } from "./errors";
 import { recordEvent } from "./events";
 import { db } from "./supabase";

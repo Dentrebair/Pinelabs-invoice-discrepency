@@ -1,84 +1,67 @@
-// ⚠️ PLACEHOLDER — replace with the shared foundation file 03_contracts.ts.
-// Written by Dev 3 from the build guide's field list because 03_contracts.ts
-// was not available. Field names follow the guide; reconcile before merge.
-import { z } from "zod";
-
-// Mirrors the cases.status check constraint in 01_schema.sql.
+// Shared TypeScript data/API contract. Copy into src/lib/contracts.ts.
+// All currency amounts are INTEGER PAISE (not floating-point rupees).
+import { z } from 'zod';
+export const DocumentType = z.enum(['PO', 'INVOICE', 'GRN', 'REVISED_INVOICE']);
 export const CaseStatus = z.enum([
-  "DRAFT",
-  "ANALYZING",
-  "NO_DISCREPANCY",
-  "DISCREPANCY_FOUND",
-  "AWAITING_APPROVAL",
-  "AWAITING_SUPPLIER",
-  "REVALIDATING",
-  "READY_FOR_PAYMENT_APPROVAL",
-  "NEEDS_REVIEW",
-  "ERROR",
+  'DRAFT', 'ANALYZING', 'NO_DISCREPANCY', 'DISCREPANCY_FOUND',
+  'AWAITING_APPROVAL', 'AWAITING_SUPPLIER', 'REVALIDATING',
+  'READY_FOR_PAYMENT_APPROVAL', 'NEEDS_REVIEW', 'ERROR'
 ]);
-export type CaseStatus = z.infer<typeof CaseStatus>;
-
-export const DocType = z.enum(["PO", "INVOICE", "GRN", "REVISED_INVOICE", "OTHER"]);
-export type DocType = z.infer<typeof DocType>;
-
-export const IssueType = z.enum(["QUANTITY", "PRICE", "DUPLICATE", "MISSING_DOCUMENT", "TAX", "OTHER"]);
-export type IssueType = z.infer<typeof IssueType>;
-
-export const DiscrepancyStatus = z.enum(["OPEN", "RESOLVED", "NEEDS_REVIEW"]);
-export type DiscrepancyStatus = z.infer<typeof DiscrepancyStatus>;
-
-export const EvidenceRef = z.object({
-  docType: DocType,
-  documentId: z.string().uuid().optional(), // filled in by the backend
-  documentNumber: z.string().optional(),
-  field: z.string().optional(),
-  value: z.string().optional(),
-  page: z.number().int().positive().optional(),
+export const LineItem = z.object({
+  lineRef: z.string().optional(),
+  sku: z.string().optional(),
+  description: z.string(),
+  unit: z.string().default('carton'),
+  quantity: z.number().int().nonnegative(), // MVP test cases use whole cartons
+  unitPricePaise: z.number().int().nonnegative().nullable(), // null for GRN
+  gstRatePercent: z.number().nonnegative().max(100).optional()
 });
-export type EvidenceRef = z.infer<typeof EvidenceRef>;
-
-// Monetary values are integer paise.
-const Paise = z.number().int().nonnegative();
-const Qty = z.number().nonnegative();
-
+export const ExtractedDocument = z.object({
+  docType: DocumentType,
+  documentNumber: z.string(),
+  supplierCode: z.string().nullable(),
+  poNumber: z.string().nullable(),
+  currency: z.literal('INR'),
+  items: z.array(LineItem).min(1),
+  notes: z.string().optional()
+});
+export type ExtractedDocument = z.infer<typeof ExtractedDocument>;
 export const Discrepancy = z.object({
-  id: z.string().uuid().optional(),
-  issueType: IssueType,
-  lineRef: z.string().nullable().optional(),
-  orderedQty: Qty.nullable().optional(),
-  invoicedQty: Qty.nullable().optional(),
-  receivedQty: Qty.nullable().optional(),
-  poUnitPricePaise: Paise.nullable().optional(),
-  invoiceUnitPricePaise: Paise.nullable().optional(),
-  amountUnderReviewPaise: Paise,
-  description: z.string().min(1),
-  recommendedAction: z.string().nullable().optional(),
-  evidenceRefs: z.array(EvidenceRef),
-  status: DiscrepancyStatus.default("OPEN"),
+  issueType: z.enum(['QUANTITY','PRICE','DUPLICATE','MISSING_DOCUMENT','TAX','OTHER']),
+  lineRef: z.string().nullable(),
+  orderedQty: z.number().nullable(),
+  invoicedQty: z.number().nullable(),
+  receivedQty: z.number().nullable(),
+  amountUnderReviewPaise: z.number().int().nonnegative(),
+  description: z.string(),
+  recommendedAction: z.string(),
+  evidenceRefs: z.array(z.object({
+    docType: DocumentType,
+    documentNumber: z.string(),
+    field: z.string()
+  }))
 });
-export type Discrepancy = z.infer<typeof Discrepancy>;
-
 export const AnalyzeResponse = z.object({
-  caseId: z.string().uuid(),
+  caseId: z.string(), // UUID; caseCode provides the human-readable ID
   caseCode: z.string(),
   status: CaseStatus,
   discrepancies: z.array(Discrepancy),
   investigationSummary: z.string(),
-  supplierMessageDraft: z.string(),
+  supplierMessageDraft: z.string().nullable()
 });
 export type AnalyzeResponse = z.infer<typeof AnalyzeResponse>;
-
 export const RevalidateResponse = z.object({
-  caseId: z.string().uuid(),
+  caseId: z.string(),
   caseCode: z.string(),
   status: CaseStatus,
   discrepancies: z.array(Discrepancy),
-  explanation: z.string(),
+  explanation: z.string()
 });
 export type RevalidateResponse = z.infer<typeof RevalidateResponse>;
-
-export const ErrorResponse = z.object({
-  error: z.string(),
-  code: z.string(),
-});
-export type ErrorResponse = z.infer<typeof ErrorResponse>;
+// HTTP contracts:
+// POST /api/analyze (multipart/form-data): { caseId?: UUID, po: PDF, invoice: PDF, grn: PDF }
+//   -> AnalyzeResponse
+// POST /api/revalidate (multipart/form-data): { caseId: UUID, revisedInvoice: PDF }
+//   -> RevalidateResponse
+// GET  /api/cases/[id] -> saved AnalyzeResponse + document metadata + events
+// Security: these are SERVER routes. Do not call Supabase with service_role from client.

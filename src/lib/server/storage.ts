@@ -1,6 +1,6 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
-import type { DocType } from "@/lib/contracts";
+import type { DocumentType } from "./types";
 import { ApiError } from "./errors";
 import type { ValidPdf } from "./pdf";
 import { BUCKET, db } from "./supabase";
@@ -8,7 +8,7 @@ import { BUCKET, db } from "./supabase";
 export type DocumentRow = {
   id: string;
   case_id: string;
-  doc_type: DocType;
+  doc_type: DocumentType;
   version: number;
   document_number: string | null;
   original_filename: string;
@@ -21,7 +21,7 @@ export type DocumentRow = {
 
 const UNIQUE_VIOLATION = "23505";
 
-async function nextVersion(caseId: string, docType: DocType): Promise<number> {
+async function nextVersion(caseId: string, docType: DocumentType): Promise<number> {
   const { data, error } = await db()
     .from("documents")
     .select("version")
@@ -37,7 +37,7 @@ async function nextVersion(caseId: string, docType: DocType): Promise<number> {
 // Paths are unique (caseId/docType/vN-uuid.pdf) so originals are never
 // overwritten; a concurrent version clash is retried once, and the orphaned
 // object is removed if the row cannot be inserted.
-export async function storeDocument(caseId: string, docType: DocType, pdf: ValidPdf): Promise<DocumentRow> {
+export async function storeDocument(caseId: string, docType: DocumentType, pdf: ValidPdf): Promise<DocumentRow> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const version = await nextVersion(caseId, docType);
     const path = `${caseId}/${docType}/v${version}-${randomUUID()}.pdf`;
@@ -72,7 +72,7 @@ export async function storeDocument(caseId: string, docType: DocType, pdf: Valid
   throw new ApiError(409, "VERSION_CONFLICT", `Concurrent upload conflict for ${docType}; retry`);
 }
 
-export async function latestDocument(caseId: string, docType: DocType): Promise<DocumentRow | null> {
+export async function latestDocument(caseId: string, docType: DocumentType): Promise<DocumentRow | null> {
   const { data, error } = await db()
     .from("documents")
     .select("*")

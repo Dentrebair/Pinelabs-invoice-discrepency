@@ -1,8 +1,11 @@
 import "server-only";
-import type { CaseStatus, Discrepancy, DocType } from "@/lib/contracts";
 import { ApiError } from "./errors";
 import type { DocumentRow } from "./storage";
 import { db } from "./supabase";
+import type { CaseStatus, Discrepancy, DocumentType, EvidenceRef } from "./types";
+
+type RowStatus = "OPEN" | "RESOLVED" | "NEEDS_REVIEW";
+type StoredRef = EvidenceRef & { documentId: string };
 
 type DiscrepancyRow = {
   id: string;
@@ -12,40 +15,39 @@ type DiscrepancyRow = {
   ordered_qty: string | number | null;
   invoiced_qty: string | number | null;
   received_qty: string | number | null;
-  po_unit_price_paise: string | number | null;
-  invoice_unit_price_paise: string | number | null;
   amount_under_review_paise: string | number;
   description: string;
   recommended_action: string | null;
-  evidence_refs: Discrepancy["evidenceRefs"];
-  status: Discrepancy["status"];
+  evidence_refs: StoredRef[];
+  status: RowStatus;
   created_at: string;
 };
 
-// Every evidence ref must point at a document stored for this case; the
-// backend fills in documentId so refs match documents rows exactly.
-export function attachEvidence(
-  discrepancies: Discrepancy[],
-  docs: Partial<Record<DocType, DocumentRow>>,
-): Discrepancy[] {
-  return discrepancies.map((d) => ({
-    ...d,
-    evidenceRefs: d.evidenceRefs.map((ref) => {
+// Documents a finding may cite: the stored row plus the number the AI extracted.
+export type CitableDocs = Partial<Record<DocumentType, { row: DocumentRow; documentNumber: string }>>;
+
+const norm = (s: string) => s.trim().toUpperCase();
+
+// Every evidence ref must cite a document stored on this case by its extracted
+// document number. Returns the refs with the internal documentId attached for
+// storage; anything else is treated as invalid AI output.
+export function linkEvidence(discrepancies: Discrepancy[], docs: CitableDocs): StoredRef[][] {
+  return discrepancies.map((d) =>
+    d.evidenceRefs.map((ref) => {
       const doc = docs[ref.docType];
-      if (!doc) {
-        throw new ApiError(422, "AI_INVALID_OUTPUT", `AI cited evidence from a ${ref.docType} that is not on this case`);
+      if (!doc || norm(doc.documentNumber) !== norm(ref.documentNumber)) {
+        throw new ApiError(422, "AI_INVALID_OUTPUT", `AI cited ${ref.docType} ${ref.documentNumber}, which is not on this case`);
       }
-      return { ...ref, documentId: doc.id };
+      return { ...ref, documentId: doc.row.id };
     }),
-  }));
+  );
 }
 
-// Initial analysis status. Anything lacking evidence, or flagged by the AI,
-// goes to NEEDS_REVIEW rather than a success status.
+// Initial analysis status. Findings without evidence go to NEEDS_REVIEW rather
+// than being presented as a confirmed discrepancy.
 export function analysisStatus(discrepancies: Discrepancy[]): CaseStatus {
-  if (discrepancies.some((d) => d.status === "NEEDS_REVIEW" || d.evidenceRefs.length === 0)) return "NEEDS_REVIEW";
-  if (discrepancies.some((d) => d.status === "OPEN")) return "DISCREPANCY_FOUND";
-  return "NO_DISCREPANCY";
+  if (discrepancies.some((d) => d.evidenceRefs.length === 0)) return "NEEDS_REVIEW";
+  return discrepancies.length > 0 ? "DISCREPANCY_FOUND" : "NO_DISCREPANCY";
 }
 
 const REVALIDATION_STATUSES: CaseStatus[] = [
@@ -55,79 +57,66 @@ const REVALIDATION_STATUSES: CaseStatus[] = [
   "NEEDS_REVIEW",
 ];
 
-// Guards the AI's proposed status: READY_FOR_PAYMENT_APPROVAL only when no
-// discrepancy is left unresolved. It is a case status, never a payout.
-export function revalidationStatus(proposed: CaseStatus, discrepancies: Discrepancy[]): CaseStatus {
+// Guards the AI's proposed status. Revalidation discrepancies are the issues
+// still outstanding, so READY_FOR_PAYMENT_APPROVAL requires an empty list.
+// It is a case status, never a payment approval or payout.
+export function revalidationStatus(proposed: CaseStatus, outstanding: Discrepancy[]): CaseStatus {
   if (!REVALIDATION_STATUSES.includes(proposed)) return "NEEDS_REVIEW";
-  const unresolved = discrepancies.some((d) => d.status !== "RESOLVED");
-  if (proposed === "READY_FOR_PAYMENT_APPROVAL" && unresolved) return "NEEDS_REVIEW";
+  if (proposed === "READY_FOR_PAYMENT_APPROVAL" && outstanding.length > 0) return "NEEDS_REVIEW";
+  if (outstanding.some((d) => d.evidenceRefs.length === 0)) return "NEEDS_REVIEW";
   return proposed;
-}
-
-function toRow(caseId: string, d: Discrepancy) {
-  return {
-    case_id: caseId,
-    issue_type: d.issueType,
-    line_ref: d.lineRef ?? null,
-    ordered_qty: d.orderedQty ?? null,
-    invoiced_qty: d.invoicedQty ?? null,
-    received_qty: d.receivedQty ?? null,
-    po_unit_price_paise: d.poUnitPricePaise ?? null,
-    invoice_unit_price_paise: d.invoiceUnitPricePaise ?? null,
-    amount_under_review_paise: d.amountUnderReviewPaise,
-    description: d.description,
-    recommended_action: d.recommendedAction ?? null,
-    evidence_refs: d.evidenceRefs,
-    status: d.status,
-  };
 }
 
 const num = (v: string | number | null) => (v === null ? null : Number(v));
 
-export function fromRow(r: DiscrepancyRow): Discrepancy {
+// Contract shape: internal ids and statuses are not part of Discrepancy.
+function fromRow(r: DiscrepancyRow): Discrepancy {
   return {
-    id: r.id,
     issueType: r.issue_type,
     lineRef: r.line_ref,
     orderedQty: num(r.ordered_qty),
     invoicedQty: num(r.invoiced_qty),
     receivedQty: num(r.received_qty),
-    poUnitPricePaise: num(r.po_unit_price_paise),
-    invoiceUnitPricePaise: num(r.invoice_unit_price_paise),
     amountUnderReviewPaise: Number(r.amount_under_review_paise),
     description: r.description,
-    recommendedAction: r.recommended_action,
-    evidenceRefs: r.evidence_refs,
-    status: r.status,
+    recommendedAction: r.recommended_action ?? "",
+    evidenceRefs: r.evidence_refs.map(({ docType, documentNumber, field }) => ({ docType, documentNumber, field })),
   };
 }
 
-export async function insertDiscrepancies(caseId: string, discrepancies: Discrepancy[]): Promise<Discrepancy[]> {
+async function insertDiscrepancies(caseId: string, discrepancies: Discrepancy[], refs: StoredRef[][]): Promise<string[]> {
   if (discrepancies.length === 0) return [];
-  const { data, error } = await db()
-    .from("discrepancies")
-    .insert(discrepancies.map((d) => toRow(caseId, d)))
-    .select();
+  const rows = discrepancies.map((d, i) => ({
+    case_id: caseId,
+    issue_type: d.issueType,
+    line_ref: d.lineRef,
+    ordered_qty: d.orderedQty,
+    invoiced_qty: d.invoicedQty,
+    received_qty: d.receivedQty,
+    amount_under_review_paise: d.amountUnderReviewPaise,
+    description: d.description,
+    recommended_action: d.recommendedAction,
+    evidence_refs: refs[i],
+    status: (d.evidenceRefs.length === 0 ? "NEEDS_REVIEW" : "OPEN") satisfies RowStatus,
+  }));
+  const { data, error } = await db().from("discrepancies").insert(rows).select("id");
   if (error) throw new Error(`discrepancy insert failed: ${error.message}`);
-  return (data as DiscrepancyRow[]).map(fromRow);
+  return data.map((r) => r.id as string);
 }
 
 // A fresh analysis supersedes previous findings; history stays in case_events.
-export async function replaceDiscrepancies(caseId: string, discrepancies: Discrepancy[]): Promise<Discrepancy[]> {
+export async function replaceDiscrepancies(caseId: string, discrepancies: Discrepancy[], refs: StoredRef[][]): Promise<string[]> {
   const { error } = await db().from("discrepancies").delete().eq("case_id", caseId);
   if (error) throw new Error(`discrepancy reset failed: ${error.message}`);
-  return insertDiscrepancies(caseId, discrepancies);
+  return insertDiscrepancies(caseId, discrepancies, refs);
 }
 
 // Revalidation that does not clear the case: unresolved findings are replaced
-// by the latest ones; RESOLVED history is kept.
-export async function replaceUnresolvedDiscrepancies(caseId: string, discrepancies: Discrepancy[]): Promise<void> {
+// by the latest outstanding ones; RESOLVED history is kept.
+export async function replaceUnresolvedDiscrepancies(caseId: string, outstanding: Discrepancy[], refs: StoredRef[][]): Promise<void> {
   const { error } = await db().from("discrepancies").delete().eq("case_id", caseId).neq("status", "RESOLVED");
   if (error) throw new Error(`discrepancy reset failed: ${error.message}`);
-  await insertDiscrepancies(
-    caseId,
-    discrepancies.filter((d) => d.status !== "RESOLVED"),
-  );
+  await insertDiscrepancies(caseId, outstanding, refs);
 }
 
 export async function resolveOpenDiscrepancies(caseId: string): Promise<number> {
@@ -135,18 +124,22 @@ export async function resolveOpenDiscrepancies(caseId: string): Promise<number> 
     .from("discrepancies")
     .update({ status: "RESOLVED" })
     .eq("case_id", caseId)
-    .eq("status", "OPEN")
+    .neq("status", "RESOLVED")
     .select("id");
   if (error) throw new Error(`discrepancy resolve failed: ${error.message}`);
   return data?.length ?? 0;
 }
 
-export async function listDiscrepancies(caseId: string): Promise<Discrepancy[]> {
+export async function listDiscrepancies(caseId: string): Promise<{ outstanding: Discrepancy[]; resolved: Discrepancy[] }> {
   const { data, error } = await db()
     .from("discrepancies")
     .select("*")
     .eq("case_id", caseId)
     .order("created_at", { ascending: true });
   if (error) throw new Error(`discrepancy lookup failed: ${error.message}`);
-  return (data as DiscrepancyRow[]).map(fromRow);
+  const rows = data as DiscrepancyRow[];
+  return {
+    outstanding: rows.filter((r) => r.status !== "RESOLVED").map(fromRow),
+    resolved: rows.filter((r) => r.status === "RESOLVED").map(fromRow),
+  };
 }

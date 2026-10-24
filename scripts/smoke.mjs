@@ -67,10 +67,14 @@ check("analyze: summary + draft present", Boolean(a.investigationSummary && a.su
 if (String(a.investigationSummary).includes("[MOCK")) console.log("  ⚠ AI_MODE=mock — result is a fixture, not a live analysis");
 
 let g = await fetch(`${BASE}/api/cases/${caseId}`).then((res) => res.json());
-const docIds = new Set(g.documents?.map((d) => d.documentId));
+const stored = new Set(g.documents?.map((d) => `${d.docType}:${d.documentNumber}`));
 check(
   "analyze: every evidence ref matches a stored document",
-  a.discrepancies.every((d) => d.evidenceRefs.length > 0 && d.evidenceRefs.every((e) => docIds.has(e.documentId))),
+  a.discrepancies.every((d) => d.evidenceRefs.length > 0 && d.evidenceRefs.every((e) => stored.has(`${e.docType}:${e.documentNumber}`))),
+);
+check(
+  "get: saved AnalyzeResponse fields at top level",
+  g.caseId === caseId && g.status === a.status && g.discrepancies?.length === a.discrepancies.length && g.supplierMessageDraft === a.supplierMessageDraft,
 );
 check("get: no storage paths leaked", !JSON.stringify(g).includes("storage_path") && !JSON.stringify(g).includes(`${caseId}/`));
 check("get: UPLOADED + ANALYSIS_COMPLETED events", ["UPLOADED", "ANALYSIS_COMPLETED"].every((t) => g.events?.some((e) => e.eventType === t)));
@@ -85,11 +89,16 @@ check("revalidate: missing file → 400", r.status === 400 && r.body.code === "M
 r = await post("/api/revalidate", { caseId, revisedInvoice: revised });
 check("revalidate: 200 READY_FOR_PAYMENT_APPROVAL", r.status === 200 && r.body.status === "READY_FOR_PAYMENT_APPROVAL", JSON.stringify(r.body));
 check("revalidate: explanation present", typeof r.body.explanation === "string" && r.body.explanation.length > 0);
+check("revalidate: no outstanding discrepancies", Array.isArray(r.body.discrepancies) && r.body.discrepancies.length === 0);
 
 g = await fetch(`${BASE}/api/cases/${caseId}`).then((res) => res.json());
 check("get: original INVOICE preserved", g.documents.some((d) => d.docType === "INVOICE"));
 check("get: REVISED_INVOICE stored", g.documents.some((d) => d.docType === "REVISED_INVOICE"));
 check("get: REVALIDATED event", g.events.some((e) => e.eventType === "REVALIDATED"));
+check(
+  "get: 20-carton finding kept as resolved",
+  g.discrepancies.length === 0 && g.resolvedDiscrepancies?.some((d) => d.amountUnderReviewPaise === 1_000_000),
+);
 
 g = await fetch(`${BASE}/api/cases/00000000-0000-0000-0000-000000000000`);
 check("get: unknown case → 404", g.status === 404);

@@ -25,36 +25,45 @@ Use `caseId` (UUID) everywhere; `caseCode` (`SR-001`) is for display only.
 |---|---|---|
 | `POST /api/analyze` | multipart: `po`, `invoice`, `grn` (PDF files), optional `caseId` (UUID; omitted → seeded SR-001) | `AnalyzeResponse` |
 | `POST /api/revalidate` | multipart: `caseId` (UUID), `revisedInvoice` (PDF file) | `RevalidateResponse` |
-| `GET /api/cases/{caseId}` | — | `{ case, documents, discrepancies, events }` |
+| `GET /api/cases/{caseId}` | — | saved `AnalyzeResponse` fields + `resolvedDiscrepancies`, `documents`, `events` |
+
+Seeded SR-001 caseId: `d7c7202a-537d-4b75-88cb-58d52753ac2e`.
 
 Sample `AnalyzeResponse` (mock mode):
 
 ```json
 {
-  "caseId": "<uuid>",
+  "caseId": "d7c7202a-537d-4b75-88cb-58d52753ac2e",
   "caseCode": "SR-001",
   "status": "DISCREPANCY_FOUND",
   "discrepancies": [{
-    "id": "<uuid>",
     "issueType": "QUANTITY",
-    "lineRef": "CTN-STD",
+    "lineRef": "1",
     "orderedQty": 100, "invoicedQty": 100, "receivedQty": 80,
-    "poUnitPricePaise": 50000, "invoiceUnitPricePaise": 50000,
     "amountUnderReviewPaise": 1000000,
     "description": "…",
     "recommendedAction": "Request a revised invoice for 80 cartons.",
-    "evidenceRefs": [{ "docType": "GRN", "documentId": "<uuid>", "documentNumber": "GRN-1001", "field": "receivedQty", "value": "80" }],
-    "status": "OPEN"
+    "evidenceRefs": [
+      { "docType": "PO", "documentNumber": "PO-1001", "field": "items[0].quantity" },
+      { "docType": "INVOICE", "documentNumber": "INV-1001", "field": "items[0].quantity" },
+      { "docType": "GRN", "documentNumber": "GRN-1001", "field": "items[0].quantity" }
+    ]
   }],
   "investigationSummary": "…",
   "supplierMessageDraft": "…"
 }
 ```
 
-`GET /api/cases/{id}` returns document metadata (`documentId, docType, version,
-documentNumber, originalFilename, extractionStatus, extractionError, uploadedAt,
-extractedJson`) — never storage paths or file bytes. Events are
-`{ eventId, eventType, actorType, note, payload, createdAt }`.
+`RevalidateResponse.discrepancies` lists issues still **outstanding** after the
+revision — an empty array with `READY_FOR_PAYMENT_APPROVAL` means resolved.
+
+`GET /api/cases/{id}` puts the saved `AnalyzeResponse` fields at the top level (so
+`AnalyzeResponse.parse` works on it; `discrepancies` = outstanding only), plus:
+`resolvedDiscrepancies`, `poNumber`, `invoiceNumber`, `currency`, `createdAt`,
+`updatedAt`, `documents[]` (`documentId, docType, version, documentNumber,
+originalFilename, extractionStatus, extractionError, uploadedAt, extractedJson`) and
+`events[]` (`eventId, eventType, actorType, note, payload, createdAt`). Storage
+paths and file bytes are never returned.
 
 ### Error codes
 
@@ -77,25 +86,36 @@ The single seam is `src/lib/server/ai.ts`. Replace `liveAnalyze` / `liveRevalida
 with your exports, then set `AI_MODE=live`. Outputs are validated with Zod; anything
 that fails becomes `422 AI_INVALID_OUTPUT` and the case goes to `NEEDS_REVIEW`.
 
+All types are from `src/lib/contracts.ts` (`ExtractedDocument`, `Discrepancy`,
+`CaseStatus`); amounts are integer paise.
+
 ```ts
 analyzeDocuments({ poPdf, invoicePdf, grnPdf }: { [k]: Buffer })
   -> {
-    extractedDocuments: { PO, INVOICE, GRN },   // each { docType, documentNumber?, lineItems?: [{ lineRef, ... }], ...any }
-    discrepancies: Discrepancy[],               // from src/lib/contracts.ts; integer paise
+    extractedDocuments: { PO: ExtractedDocument, INVOICE: ExtractedDocument, GRN: ExtractedDocument },
+    discrepancies: Discrepancy[],
     investigationSummary: string,
-    supplierMessageDraft: string,
+    supplierMessageDraft: string | null,
   }
 
-revalidateInvoice({ originalDocuments: { PO, INVOICE, GRN }, revisedInvoicePdf: Buffer })
-  -> { extractedRevisedInvoice, discrepancies: Discrepancy[], explanation: string, status: CaseStatus }
+revalidateInvoice({ originalDocuments: { PO, INVOICE, GRN }: ExtractedDocument, revisedInvoicePdf: Buffer })
+  -> {
+    extractedRevisedInvoice: ExtractedDocument,
+    discrepancies: Discrepancy[],   // still OUTSTANDING; [] when the revision resolves the case
+    explanation: string,
+    status: CaseStatus,
+  }
 ```
 
-- `evidenceRefs[].docType` must be a document on the case (`PO`, `INVOICE`, `GRN`,
-  plus `REVISED_INVOICE` on revalidate). The backend fills `documentId`.
-- `originalDocuments` is the `extracted_json` you returned at analysis time.
-- Revalidation status is guarded: `READY_FOR_PAYMENT_APPROVAL` is only accepted if
-  every returned discrepancy is `RESOLVED`; otherwise it becomes `NEEDS_REVIEW`.
-  It is a case status, not a payment approval or payout.
+- Each `extractedDocuments[X].docType` must equal `X` (catches swapped uploads).
+- Every `evidenceRefs[]` entry must cite `docType` + `documentNumber` of a document
+  on the case (`PO`, `INVOICE`, `GRN`, plus `REVISED_INVOICE` on revalidate) using the
+  number you extracted. Otherwise → `AI_INVALID_OUTPUT`.
+- `originalDocuments` is the `ExtractedDocument` you returned at analysis time.
+- Status guard: `READY_FOR_PAYMENT_APPROVAL` is only accepted with an empty
+  `discrepancies` array; allowed revalidation statuses are `READY_FOR_PAYMENT_APPROVAL`,
+  `DISCREPANCY_FOUND`, `AWAITING_SUPPLIER`, `NEEDS_REVIEW` — anything else becomes
+  `NEEDS_REVIEW`. It is a case status, not a payment approval or payout.
 
 ## Persistence behaviour
 
@@ -103,8 +123,10 @@ revalidateInvoice({ originalDocuments: { PO, INVOICE, GRN }, revisedInvoicePdf: 
   the version is the next integer per (case, docType). Originals are never overwritten.
 - The revised invoice is stored as `REVISED_INVOICE`; the original `INVOICE` row stays.
 - Re-running analyze replaces the case's discrepancy rows; history stays in `case_events`.
-- On a successful revalidation, `OPEN` discrepancies become `RESOLVED`; otherwise
-  unresolved rows are replaced by the latest findings.
+- On a successful revalidation, open discrepancy rows become `RESOLVED`; otherwise
+  unresolved rows are replaced by the latest outstanding findings.
+- Discrepancy rows keep an internal `status` and per-ref `documentId` in the DB;
+  these are stripped from API responses to match the contract.
 
 ## curl
 

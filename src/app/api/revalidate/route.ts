@@ -1,19 +1,20 @@
 import { NextResponse } from "next/server";
-import { RevalidateResponse, type CaseStatus, type DocType } from "@/lib/contracts";
-import { aiMode, ExtractedDocument, runRevalidation } from "@/lib/server/ai";
+import { ExtractedDocument, RevalidateResponse } from "@/lib/contracts";
+import { aiMode, runRevalidation } from "@/lib/server/ai";
 import { failCase, resolveCase, updateCase } from "@/lib/server/cases";
 import {
-  attachEvidence,
-  listDiscrepancies,
+  linkEvidence,
   replaceUnresolvedDiscrepancies,
   resolveOpenDiscrepancies,
   revalidationStatus,
+  type CitableDocs,
 } from "@/lib/server/discrepancies";
 import { ApiError, assertUuid, errorResponse } from "@/lib/server/errors";
 import { recordEvent } from "@/lib/server/events";
 import { readForm, readPdfField } from "@/lib/server/pdf";
 import { latestDocument, storeDocument, type DocumentRow } from "@/lib/server/storage";
 import { db } from "@/lib/server/supabase";
+import type { CaseStatus } from "@/lib/server/types";
 
 export const runtime = "nodejs";
 
@@ -53,21 +54,22 @@ export async function POST(req: Request) {
       },
       revisedInvoicePdf: pdf.bytes,
     });
-    const docs: Partial<Record<DocType, DocumentRow>> = {
-      PO: originals.PO.row,
-      INVOICE: originals.INVOICE.row,
-      GRN: originals.GRN.row,
-      REVISED_INVOICE: revised,
+
+    const citable: CitableDocs = {
+      PO: { row: originals.PO.row, documentNumber: originals.PO.extracted.documentNumber },
+      INVOICE: { row: originals.INVOICE.row, documentNumber: originals.INVOICE.extracted.documentNumber },
+      GRN: { row: originals.GRN.row, documentNumber: originals.GRN.extracted.documentNumber },
+      REVISED_INVOICE: { row: revised, documentNumber: ai.extractedRevisedInvoice.documentNumber },
     };
-    const findings = attachEvidence(ai.discrepancies, docs);
-    const status = revalidationStatus(ai.status, findings);
+    const refs = linkEvidence(ai.discrepancies, citable);
+    const status = revalidationStatus(ai.status, ai.discrepancies);
 
     const { error } = await db()
       .from("documents")
       .update({
         extraction_status: "PARSED",
         extracted_json: ai.extractedRevisedInvoice,
-        document_number: ai.extractedRevisedInvoice.documentNumber ?? null,
+        document_number: ai.extractedRevisedInvoice.documentNumber,
       })
       .eq("id", revised.id);
     if (error) throw new Error(`document update failed: ${error.message}`);
@@ -76,10 +78,9 @@ export async function POST(req: Request) {
     if (status === "READY_FOR_PAYMENT_APPROVAL") {
       resolvedCount = await resolveOpenDiscrepancies(kase.id);
     } else {
-      await replaceUnresolvedDiscrepancies(kase.id, findings);
+      await replaceUnresolvedDiscrepancies(kase.id, ai.discrepancies, refs);
     }
     await updateCase(kase.id, { status });
-    const discrepancies = await listDiscrepancies(kase.id);
 
     await recordEvent(kase.id, "REVALIDATED", "AI", `Revalidation complete: ${status}`, {
       aiMode: mode,
@@ -87,14 +88,14 @@ export async function POST(req: Request) {
       status,
       revisedDocumentId: revised.id,
       resolvedCount,
-      openCount: discrepancies.filter((d) => d.status !== "RESOLVED").length,
+      outstandingCount: ai.discrepancies.length,
     });
 
     const body: RevalidateResponse = RevalidateResponse.parse({
       caseId: kase.id,
       caseCode: kase.case_code,
       status,
-      discrepancies,
+      discrepancies: ai.discrepancies,
       explanation: ai.explanation,
     });
     return NextResponse.json(body);

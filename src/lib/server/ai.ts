@@ -1,18 +1,11 @@
 import "server-only";
 import { z } from "zod";
-import { CaseStatus, Discrepancy, DocType } from "@/lib/contracts";
+import { CaseStatus, Discrepancy, ExtractedDocument } from "@/lib/contracts";
 import { ApiError } from "./errors";
 
 // Integration seam with Dev 2's AI module (src/lib/ai/*). The backend only
 // validates and persists these results; extraction, matching and calculations
 // live in Dev 2's code. Agree these shapes with Dev 2 before wiring "live".
-
-export const ExtractedDocument = z.looseObject({
-  docType: DocType,
-  documentNumber: z.string().nullable().optional(),
-  lineItems: z.array(z.looseObject({ lineRef: z.string() })).optional(),
-});
-export type ExtractedDocument = z.infer<typeof ExtractedDocument>;
 
 export const AnalyzeAiResult = z.object({
   extractedDocuments: z.object({
@@ -22,10 +15,11 @@ export const AnalyzeAiResult = z.object({
   }),
   discrepancies: z.array(Discrepancy),
   investigationSummary: z.string().min(1),
-  supplierMessageDraft: z.string().min(1),
+  supplierMessageDraft: z.string().min(1).nullable(),
 });
 export type AnalyzeAiResult = z.infer<typeof AnalyzeAiResult>;
 
+// discrepancies = issues still outstanding after the revision (empty when resolved).
 export const RevalidateAiResult = z.object({
   extractedRevisedInvoice: ExtractedDocument,
   discrepancies: z.array(Discrepancy),
@@ -63,46 +57,65 @@ export async function runRevalidation(input: RevalidateInput): Promise<Revalidat
 //   import { analyzeDocuments, revalidateInvoice } from "@/lib/ai";
 //   return analyzeDocuments(input);
 
-async function liveAnalyze(_input: AnalyzeInput): Promise<unknown> {
+async function liveAnalyze(input: AnalyzeInput): Promise<unknown> {
+  void input;
   throw new ApiError(503, "AI_NOT_CONFIGURED", "Live AI analysis is not wired up yet");
 }
 
-async function liveRevalidate(_input: RevalidateInput): Promise<unknown> {
+async function liveRevalidate(input: RevalidateInput): Promise<unknown> {
+  void input;
   throw new ApiError(503, "AI_NOT_CONFIGURED", "Live AI revalidation is not wired up yet");
 }
 
 // --- mock: TEMPORARY fixture for endpoint tests -----------------------------
 // ⚠️ MOCK — not a live AI result. Returns the SR-001 fixture regardless of the
-// uploaded files. Every text field is prefixed with [MOCK] so it can never be
+// uploaded files. Text fields are prefixed with [MOCK] so it can never be
 // mistaken for a real finding.
 
 const MOCK = "[MOCK AI RESULT — not a live analysis]";
 
+const carton = (quantity: number, unitPricePaise: number | null) => ({
+  lineRef: "1",
+  sku: "CARTON-01",
+  description: "Corrugated Carton",
+  unit: "carton",
+  quantity,
+  unitPricePaise,
+  gstRatePercent: 18,
+});
+
+const mockDoc = (docType: string, documentNumber: string, item: ReturnType<typeof carton>) => ({
+  docType,
+  documentNumber,
+  supplierCode: "SUP-001",
+  poNumber: "PO-1001",
+  currency: "INR",
+  items: [item],
+  notes: MOCK,
+});
+
 async function mockAnalyze(): Promise<unknown> {
   return {
     extractedDocuments: {
-      PO: { docType: "PO", documentNumber: "PO-1001", lineItems: [{ lineRef: "CTN-STD", quantity: 100, unitPricePaise: 50000 }] },
-      INVOICE: { docType: "INVOICE", documentNumber: "INV-1001", lineItems: [{ lineRef: "CTN-STD", quantity: 100, unitPricePaise: 50000 }] },
-      GRN: { docType: "GRN", documentNumber: "GRN-1001", lineItems: [{ lineRef: "CTN-STD", quantity: 80 }] },
+      PO: mockDoc("PO", "PO-1001", carton(100, 50_000)),
+      INVOICE: mockDoc("INVOICE", "INV-1001", carton(100, 50_000)),
+      GRN: mockDoc("GRN", "GRN-1001", carton(80, null)),
     },
     discrepancies: [
       {
         issueType: "QUANTITY",
-        lineRef: "CTN-STD",
+        lineRef: "1",
         orderedQty: 100,
         invoicedQty: 100,
         receivedQty: 80,
-        poUnitPricePaise: 50000,
-        invoiceUnitPricePaise: 50000,
         amountUnderReviewPaise: 1_000_000,
         description: `${MOCK} Invoiced 100 cartons but GRN records 80 received; 20 cartons under review.`,
         recommendedAction: "Request a revised invoice for 80 cartons.",
         evidenceRefs: [
-          { docType: "PO", documentNumber: "PO-1001", field: "quantity", value: "100" },
-          { docType: "INVOICE", documentNumber: "INV-1001", field: "quantity", value: "100" },
-          { docType: "GRN", documentNumber: "GRN-1001", field: "receivedQty", value: "80" },
+          { docType: "PO", documentNumber: "PO-1001", field: "items[0].quantity" },
+          { docType: "INVOICE", documentNumber: "INV-1001", field: "items[0].quantity" },
+          { docType: "GRN", documentNumber: "GRN-1001", field: "items[0].quantity" },
         ],
-        status: "OPEN",
       },
     ],
     investigationSummary: `${MOCK} PO and invoice show 100 cartons at ₹500; GRN shows 80 received. ₹10,000 (pre-GST) is under review.`,
@@ -112,13 +125,9 @@ async function mockAnalyze(): Promise<unknown> {
 
 async function mockRevalidate(): Promise<unknown> {
   return {
-    extractedRevisedInvoice: {
-      docType: "REVISED_INVOICE",
-      documentNumber: "INV-1001-R1",
-      lineItems: [{ lineRef: "CTN-STD", quantity: 80, unitPricePaise: 50000 }],
-    },
+    extractedRevisedInvoice: mockDoc("REVISED_INVOICE", "INV-1001-R1", carton(80, 50_000)),
     discrepancies: [],
-    explanation: `${MOCK} Revised invoice bills 80 cartons, matching GRN-1001. No open discrepancies.`,
+    explanation: `${MOCK} Revised invoice bills 80 cartons, matching GRN-1001. No outstanding discrepancies.`,
     status: "READY_FOR_PAYMENT_APPROVAL",
   };
 }

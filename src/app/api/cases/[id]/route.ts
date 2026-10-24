@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { AnalyzeResponse } from "@/lib/contracts";
 import { resolveCase } from "@/lib/server/cases";
 import { listDiscrepancies } from "@/lib/server/discrepancies";
 import { assertUuid, errorResponse } from "@/lib/server/errors";
@@ -6,9 +7,10 @@ import { db } from "@/lib/server/supabase";
 
 export const runtime = "nodejs";
 
-// Response wrapper (agree with Dev 1):
-// { case, documents, discrepancies, events }
-// Document metadata only — storage paths and file bytes are never returned.
+// Contract: saved AnalyzeResponse + document metadata + events.
+// The AnalyzeResponse fields sit at the top level (so AnalyzeResponse.parse
+// works on this body); `discrepancies` holds outstanding issues only, and
+// resolved ones are listed separately. Storage paths and bytes are never returned.
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
@@ -30,19 +32,23 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     if (docs.error) throw new Error(`documents lookup failed: ${docs.error.message}`);
     if (events.error) throw new Error(`events lookup failed: ${events.error.message}`);
 
+    const analysis = AnalyzeResponse.parse({
+      caseId: kase.id,
+      caseCode: kase.case_code,
+      status: kase.status,
+      discrepancies: discrepancies.outstanding,
+      investigationSummary: kase.investigation_summary ?? "",
+      supplierMessageDraft: kase.supplier_message_draft,
+    });
+
     return NextResponse.json({
-      case: {
-        caseId: kase.id,
-        caseCode: kase.case_code,
-        status: kase.status,
-        poNumber: kase.po_number,
-        invoiceNumber: kase.invoice_number,
-        currency: kase.currency,
-        investigationSummary: kase.investigation_summary,
-        supplierMessageDraft: kase.supplier_message_draft,
-        createdAt: kase.created_at,
-        updatedAt: kase.updated_at,
-      },
+      ...analysis,
+      resolvedDiscrepancies: discrepancies.resolved,
+      poNumber: kase.po_number,
+      invoiceNumber: kase.invoice_number,
+      currency: kase.currency,
+      createdAt: kase.created_at,
+      updatedAt: kase.updated_at,
       documents: docs.data.map((d) => ({
         documentId: d.id,
         docType: d.doc_type,
@@ -54,7 +60,6 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
         uploadedAt: d.uploaded_at,
         extractedJson: d.extracted_json,
       })),
-      discrepancies,
       events: events.data.map((e) => ({
         eventId: e.id,
         eventType: e.event_type,

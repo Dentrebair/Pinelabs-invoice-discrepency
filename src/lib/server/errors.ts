@@ -1,6 +1,6 @@
 import "server-only";
 import { NextResponse } from "next/server";
-import type { ErrorResponse } from "@/lib/contracts";
+import type { ErrorResponse } from "./types";
 
 export class ApiError extends Error {
   constructor(
